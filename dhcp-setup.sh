@@ -8,7 +8,26 @@ yum install -y dhcp-server
 
 cp /usr/lib/systemd/system/dhcpd.service /etc/systemd/system/
 
-sed -i '/^ExecStart=/ s/$/ ens34/' /etc/systemd/system/dhcpd.service
+
+# Source the shared configuration to get the interface name
+CONF_DIR="/etc/pxe-server"
+CONF_FILE="${CONF_DIR}/pxe.conf"
+
+if [ ! -f "$CONF_FILE" ]; then
+    echo "Error: Configuration file $CONF_FILE not found."
+    echo "Please run nic-setup.sh first to generate it."
+    exit 1
+fi
+source "$CONF_FILE"
+
+if [ -z "$INTERFACE" ]; then
+    echo "Error: INTERFACE variable not set in $CONF_FILE."
+    exit 1
+fi
+
+echo "Configuring DHCP server to run on interface: $INTERFACE"
+sed -i "/^ExecStart=/ s/$/ $INTERFACE/" /etc/systemd/system/dhcpd.service
+
 
 cat <<EOF > /etc/dhcp/dhcpd.conf
 # DHCP Server Configuration file.
