@@ -7,6 +7,17 @@ set -e
 
 echo "--- Setting up TFTP Server ---"
 
+# Source the shared configuration to get the interface name and PXE_SERVER_IP
+CONF_DIR="/etc/pxe-server"
+CONF_FILE="${CONF_DIR}/pxe.conf"
+
+if [ ! -f "$CONF_FILE" ]; then
+    echo "Error: Configuration file $CONF_FILE not found."
+    echo "Please run nic-setup.sh first to generate it."
+    exit 1
+fi
+source "$CONF_FILE"
+
 # Check for root privileges
 if [ "$EUID" -ne 0 ]; then
   echo "Please run as root or with sudo."
@@ -52,7 +63,7 @@ echo "Creating GRUB boot configuration..."
 cat <<EOF > /var/lib/tftpboot/redhat/EFI/BOOT/grub.cfg
 set timeout=60
 menuentry 'Install RHEL 9' {
-  linuxefi images/RHEL-9/vmlinuz ip=dhcp inst.repo=http://10.0.0.253/RHEL-9/
+  linuxefi images/RHEL-9/vmlinuz ip=dhcp inst.repo=http://${PXE_SERVER_IP}/RHEL-9/
   initrdefi images/RHEL-9/initrd.img
 }
 EOF

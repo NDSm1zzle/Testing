@@ -20,6 +20,9 @@ if [ ! -f "$CONF_FILE" ]; then
 fi
 source "$CONF_FILE"
 
+echo "DEBUG: INTERFACE from $CONF_FILE is: $INTERFACE"
+echo "DEBUG: PXE_SERVER_IP from $CONF_FILE is: $PXE_SERVER_IP"
+
 if [ -z "$INTERFACE" ]; then
     echo "Error: INTERFACE variable not set in $CONF_FILE."
     exit 1
@@ -54,20 +57,21 @@ subnet 10.0.0.0 netmask 255.255.255.0 {
   option routers 10.0.0.1;
   option domain-name-servers 10.0.0.1;
   range 10.0.0.100 10.0.0.200;
-  class "pxeclients" {
-    match if substring (option vendor-class-identifier, 0, 9) = "PXEClient";
-    next-server 10.0.0.253;
-          if option architecture-type = 00:07 {
-            filename "redhat/EFI/BOOT/BOOTX64.EFI";
-          }
-          else {
-            filename "pxelinux/pxelinux.0";
-          }
-  }
-  class "httpclients" {
-    match if substring (option vendor-class-identifier, 0, 10) = "HTTPClient";
-    option vendor-class-identifier "HTTPClient";
-    filename "http://10.0.0.253/redhat/EFI/BOOT/BOOTX64.EFI";
+  next-server 10.0.0.253;
+
+  # Differentiate between BIOS and UEFI clients
+  if option architecture-type = 00:00 {
+    # BIOS client
+    filename "pxelinux/pxelinux.0";
+  } elsif option architecture-type = 00:07 OR option architecture-type = 00:09 {
+    # UEFI client
+    if substring (option vendor-class-identifier, 0, 10) = "HTTPClient" {
+      # ESXi UEFI HTTP CLient
+      filename "http://10.0.0.253/esxi/mboot.efi";
+    } else {
+      # RHEL UEFI PXE Client
+      filename "redhat/EFI/BOOT/BOOTX64.EFI";
+    }
   }
 }
 EOF

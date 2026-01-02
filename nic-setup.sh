@@ -48,6 +48,7 @@ echo "Found interface: $INTERFACE."
 echo "Saving interface configuration to $CONF_FILE..."
 mkdir -p "$CONF_DIR"
 echo "INTERFACE=${INTERFACE}" > "$CONF_FILE"
+echo "PXE_SERVER_IP=${PXE_SERVER_IP}" >> "$CONF_FILE"
 check_status "Saving interface configuration"
 
 # 4. Find or create a connection profile for the interface
