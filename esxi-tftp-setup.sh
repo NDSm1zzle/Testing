@@ -64,7 +64,7 @@ if [ -z "$ISO_DEVICE" ]; then
                 
                 KS_DEST_FILE="${KS_DEST_DIR}/ks.cfg"
                 KS_MOUNT_POINT=""
-                MOUNT_INFO=$(mount | grep "^$KICKSTART_PARTITION ")
+                MOUNT_INFO=$(mount | grep "^$KICKSTART_PARTITION " || true)
 
                 if [ -n "$MOUNT_INFO" ]; then
                     KS_MOUNT_POINT=$(echo "$MOUNT_INFO" | awk '{print $3}')
@@ -134,8 +134,21 @@ echo "Copying entire ESXi ISO content to $ESXI_HTTP_ISO_CONTENT_DEST..."
 rsync -av --delete --progress "$ESXI_ISO_MOUNT_POINT/" "$ESXI_HTTP_ISO_CONTENT_DEST"/
 echo "ESXi ISO content copied successfully."
 
+# Ensure the copied content is writable so we can modify boot.cfg
+chmod -R u+w "$ESXI_HTTP_ISO_CONTENT_DEST"
+
+# Convert all filenames to lowercase to ensure HTTP server compatibility
+# (ESXi bootloader requests lowercase filenames, but ISOs are often uppercase)
+echo "Converting filenames to lowercase..."
+find "$ESXI_HTTP_ISO_CONTENT_DEST" -mindepth 1 -depth | while read -r SRC; do
+    DST=$(dirname "$SRC")/$(basename "$SRC" | tr '[:upper:]' '[:lower:]')
+    if [ "$SRC" != "$DST" ]; then
+        mv "$SRC" "$DST"
+    fi
+done
+
 echo "Copying ESXi EFI bootloader to $ESXI_HTTP_DEST/mboot.efi..."
-EFI_BOOT_FILE=$(find "$ESXI_ISO_MOUNT_POINT/efi/boot/" -iname "bootx64.efi" | head -n 1)
+EFI_BOOT_FILE=$(find "$ESXI_ISO_MOUNT_POINT" -iname "bootx64.efi" | grep -i "/efi/boot/" | head -n 1)
 if [ -n "$EFI_BOOT_FILE" ]; then
     cp "$EFI_BOOT_FILE" "$ESXI_HTTP_DEST"/mboot.efi
 else
@@ -145,14 +158,17 @@ else
 fi
 
 # 5. Modify boot.cfg for HTTP boot
-BOOT_CFG_FILE=$(find "$ESXI_HTTP_ISO_CONTENT_DEST" -maxdepth 1 -iname "boot.cfg" | head -n 1)
+BOOT_CFG_FILE=$(find "$ESXI_HTTP_ISO_CONTENT_DEST" -iname "boot.cfg" | grep -i "/efi/boot/" | head -n 1)
 
 if [ -n "$BOOT_CFG_FILE" ]; then
     echo "Found boot config at $BOOT_CFG_FILE. Modifying for HTTP boot..."
     
-    # Temporarily remove all kernelopt lines from the original file to avoid duplicates
-    # and preserve the modules line
-    MODULES_LINE=$(grep "^modules=" "$BOOT_CFG_FILE")
+    # Remove leading slashes from kernel and module paths
+    sed -i 's|kernel=/|kernel=|g' "$BOOT_CFG_FILE"
+    sed -i 's|modules=/|modules=|g' "$BOOT_CFG_FILE"
+    sed -i 's| --- /| --- |g' "$BOOT_CFG_FILE"
+    
+    # Remove existing kernelopt lines to avoid duplicates
     sed -i '/^kernelopt=/d' "$BOOT_CFG_FILE"
     
     # Add the correct kernelopt for a scripted or interactive install
@@ -165,20 +181,20 @@ if [ -n "$BOOT_CFG_FILE" ]; then
         echo "kernelopt=runweasel" >> "$BOOT_CFG_FILE"
         echo "Warning: Kickstart file not found. The installer will be interactive."
     fi
-    # Restore the modules line if it was removed
-    if ! grep -q "^modules=" "$BOOT_CFG_FILE"; then
-        echo "$MODULES_LINE" >> "$BOOT_CFG_FILE"
-    fi
     
     # Remove any existing prefix and add the correct one at the end
     sed -i '/^prefix=/d' "$BOOT_CFG_FILE"
-    PREFIX_LINE="prefix=http://${PXE_SERVER_IP}/esxi/${ESXI_VERSION}"
+    PREFIX_LINE="prefix=http://${PXE_SERVER_IP}/esxi/${ESXI_VERSION}/"
     echo "$PREFIX_LINE" >> "$BOOT_CFG_FILE"
     echo "Set HTTP boot prefix in $BOOT_CFG_FILE."
 
     # Copy the modified boot config to the final destination for the bootloader
     echo "Copying modified boot config to $ESXI_HTTP_DEST/boot.cfg..."
     cp "$BOOT_CFG_FILE" "$ESXI_HTTP_DEST/boot.cfg"
+
+    # Create uppercase copy for compatibility with some physical UEFI implementations
+    # Some physical NICs/firmware request BOOT.CFG instead of boot.cfg
+    cp "$BOOT_CFG_FILE" "$ESXI_HTTP_DEST/BOOT.CFG"
 else
     echo "Warning: boot.cfg or BOOT.CFG not found in $ESXI_HTTP_ISO_CONTENT_DEST. Cannot configure HTTP boot."
 fi
