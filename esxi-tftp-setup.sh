@@ -28,83 +28,173 @@ ESXI_ISO_MOUNT_POINT="/mnt/esxi_iso"
 ESXI_HTTP_DEST="/var/www/html/esxi"
 KS_DEST_DIR="/var/www/html/esxi_ksFiles"
 
-# 1. Find the ESXi installation media (CD-ROM or USB)
+# 1. Find installation media and Kickstart source
 ISO_DEVICE=""
+USB_DISK_NAME=""
+USB_PARTITIONS=()
 
-# First, look for a virtual CD-ROM (ISO)
-echo "Searching for ESXi installation media..."
+# First, probe for a USB device, as it might be both the install source and ks.cfg source.
+echo "--- Probing for attached media ---"
+echo "Probing for USB devices..."
+USB_DISK_NAME=$(lsblk -no NAME,TRAN | awk '$2=="usb"{print $1}' | head -n 1)
+if [ -n "$USB_DISK_NAME" ]; then
+    echo "Found USB disk: ${USB_DISK_NAME}"
+    mapfile -t USB_PARTITIONS < <(lsblk -lno NAME,TYPE "/dev/${USB_DISK_NAME}" | awk '$2=="part"{print "/dev/"$1}')
+else
+    echo "No USB device found."
+fi
+
+# Next, probe for a CD-ROM device. This is the preferred install source.
+echo "Probing for CD-ROM devices..."
 CD_DEVICE_CANDIDATE=$(lsblk -no NAME,TYPE | awk '$2=="rom"{print "/dev/"$1}' | head -n 1)
 
 if [ -n "$CD_DEVICE_CANDIDATE" ]; then
     echo "Found CD-ROM device at $CD_DEVICE_CANDIDATE. Checking for media..."
     if dd if="$CD_DEVICE_CANDIDATE" of=/dev/null count=1 >/dev/null 2>&1; then
         ISO_DEVICE="$CD_DEVICE_CANDIDATE"
-        echo "Found usable ESXi ISO media in $ISO_DEVICE."
+        echo "Using CD-ROM as installation media source: $ISO_DEVICE."
     else
         echo "No media found in $CD_DEVICE_CANDIDATE."
     fi
 fi
 
-# If no usable CD-ROM was found, look for a USB device.
+# If no CD-ROM was usable, fall back to the first partition of the USB device.
 if [ -z "$ISO_DEVICE" ]; then
-    echo "No usable CD-ROM found. Looking for a bootable USB installation media..."
-    USB_DISK_NAME=$(lsblk -no NAME,TRAN | awk '$2=="usb"{print $1}' | head -n 1)
-
-    if [ -n "$USB_DISK_NAME" ]; then
-        echo "Found USB disk: ${USB_DISK_NAME}"
-        mapfile -t USB_PARTITIONS < <(lsblk -lno NAME,TYPE "/dev/${USB_DISK_NAME}" | awk '$2=="part"{print "/dev/"$1}')
-
-        if [ ${#USB_PARTITIONS[@]} -gt 0 ]; then
-            ISO_DEVICE="${USB_PARTITIONS[0]}"
-            echo "Using first partition for ESXi installation media: $ISO_DEVICE."
-
-            if [ ${#USB_PARTITIONS[@]} -gt 1 ]; then
-                KICKSTART_PARTITION="${USB_PARTITIONS[1]}"
-                echo "Found second partition to check for kickstart file: $KICKSTART_PARTITION."
-                
-                KS_DEST_FILE="${KS_DEST_DIR}/ks.cfg"
-                KS_MOUNT_POINT=""
-                MOUNT_INFO=$(mount | grep "^$KICKSTART_PARTITION " || true)
-
-                if [ -n "$MOUNT_INFO" ]; then
-                    KS_MOUNT_POINT=$(echo "$MOUNT_INFO" | awk '{print $3}')
-                    echo "Kickstart partition $KICKSTART_PARTITION is already mounted at $KS_MOUNT_POINT."
-                else
-                    KS_MOUNT_POINT="/mnt/ks_partition"
-                    mkdir -p "$KS_MOUNT_POINT"
-                    echo "Mounting $KICKSTART_PARTITION to check for ks.cfg..."
-                    mount -o ro "$KICKSTART_PARTITION" "$KS_MOUNT_POINT"
-                fi
-                
-                KS_SRC_FILE="${KS_MOUNT_POINT}/ks.cfg"
-
-                if [ -f "$KS_SRC_FILE" ]; then
-                    echo "Found kickstart file at $KS_SRC_FILE."
-                    mkdir -p "$KS_DEST_DIR"
-                    cp "$KS_SRC_FILE" "$KS_DEST_FILE"
-                    echo "Successfully copied ks.cfg to $KS_DEST_FILE."
-                    chmod 644 "$KS_DEST_FILE"
-                    chown apache:apache "$KS_DEST_FILE" || true
-                else
-                    echo "Warning: ks.cfg was not found at $KS_SRC_FILE."
-                fi
-                
-                # Unmount only if we mounted it
-                if [ -z "$MOUNT_INFO" ]; then
-                    umount "$KS_MOUNT_POINT"
-                fi
-            else
-                echo "Info: Only one partition found. No second partition to check for kickstart file."
-            fi
-        else
-            echo "Error: No partitions found on USB disk ${USB_DISK_NAME}."
-        fi
+    if [ ${#USB_PARTITIONS[@]} -gt 0 ]; then
+        ISO_DEVICE="${USB_PARTITIONS[0]}"
+        echo "Using first USB partition as installation media source: $ISO_DEVICE."
+    else
+        echo "No CD-ROM or usable USB partitions found for installation media."
     fi
 fi
 
+# Abort if we couldn't find any installation media.
 if [ -z "$ISO_DEVICE" ]; then
-    echo "Error: Could not find an attached ESXi installation media (CD-ROM or bootable USB)."
+    echo "Error: Could not find an attached ESXi installation media."
     exit 1
+fi
+
+# Now, find and stage the Kickstart file and payload from USB if it exists.
+echo "--- Searching for Kickstart Configuration and Payload on USB ---"
+if [ ${#USB_PARTITIONS[@]} -gt 1 ]; then
+    # Handle Kickstart file from partition 2
+    KICKSTART_PARTITION="${USB_PARTITIONS[1]}"
+    echo "Found second USB partition. Checking for kickstart file: $KICKSTART_PARTITION."
+    
+    KS_DEST_FILE="${KS_DEST_DIR}/ks.cfg"
+    mkdir -p "$KS_DEST_DIR"
+    rm -f "$KS_DEST_FILE"
+    
+    KS_MOUNT_POINT=""
+    MOUNT_INFO=$(mount | grep "^$KICKSTART_PARTITION " || true)
+
+    if [ -n "$MOUNT_INFO" ]; then
+        KS_MOUNT_POINT=$(echo "$MOUNT_INFO" | awk '{print $3}')
+        echo "Kickstart partition $KICKSTART_PARTITION is already mounted at $KS_MOUNT_POINT."
+    else
+        KS_MOUNT_POINT="/mnt/ks_partition"
+        mkdir -p "$KS_MOUNT_POINT"
+        echo "Mounting $KICKSTART_PARTITION to check for ks.cfg..."
+        mount -o ro "$KICKSTART_PARTITION" "$KS_MOUNT_POINT"
+    fi
+    
+    KS_SRC_FILE="${KS_MOUNT_POINT}/ks.cfg"
+
+    if [ -f "$KS_SRC_FILE" ]; then
+        echo "Found kickstart file on USB at $KS_SRC_FILE. Copying..."
+        cp "$KS_SRC_FILE" "$KS_DEST_FILE"
+        echo "Successfully copied ks.cfg to $KS_DEST_FILE."
+
+        echo "Injecting PXE server IP into kickstart file..."
+        sed -i "s|__PXE_SERVER_IP__|${PXE_SERVER_IP}|g" "$KS_DEST_FILE"
+
+        chmod 644 "$KS_DEST_FILE"
+        chown apache:apache "$KS_DEST_FILE" || true
+    else
+        echo "Warning: ks.cfg was not found at $KS_SRC_FILE."
+    fi
+    
+    # Unmount partition 2 only if we mounted it
+    if [ -z "$MOUNT_INFO" ]; then
+        umount "$KS_MOUNT_POINT"
+    fi
+
+    # Handle payload from partition 3
+    if [ ${#USB_PARTITIONS[@]} -gt 2 ]; then
+        PAYLOAD_PARTITION="${USB_PARTITIONS[2]}"
+        echo "Found third USB partition. Processing payload: $PAYLOAD_PARTITION."
+        
+        PAYLOAD_HTTP_DEST="/var/www/html/esxi_payload"
+        mkdir -p "$PAYLOAD_HTTP_DEST"
+        
+        PAYLOAD_MOUNT_POINT=""
+        MOUNT_INFO_PAYLOAD=$(mount | grep "^$PAYLOAD_PARTITION " || true)
+
+        if [ -n "$MOUNT_INFO_PAYLOAD" ]; then
+            PAYLOAD_MOUNT_POINT=$(echo "$MOUNT_INFO_PAYLOAD" | awk '{print $3}')
+            echo "Payload partition $PAYLOAD_PARTITION is already mounted at $PAYLOAD_MOUNT_POINT."
+        else
+            PAYLOAD_MOUNT_POINT="/mnt/usb_payload"
+            mkdir -p "$PAYLOAD_MOUNT_POINT"
+            echo "Mounting $PAYLOAD_PARTITION to process payload..."
+            mount -o ro "$PAYLOAD_PARTITION" "$PAYLOAD_MOUNT_POINT"
+        fi
+
+        PAYLOAD_TARBALL="${PAYLOAD_HTTP_DEST}/payload.tar.gz"
+        echo "Creating payload tarball at $PAYLOAD_TARBALL..."
+        if tar -czf "$PAYLOAD_TARBALL" -C "$PAYLOAD_MOUNT_POINT" .; then
+            echo "Payload tarball created successfully."
+            chmod 644 "$PAYLOAD_TARBALL"
+            chown apache:apache "$PAYLOAD_TARBALL" || true
+        else
+            echo "Error: Failed to create payload tarball."
+        fi
+
+        # Unmount partition 3 only if we mounted it
+        if [ -z "$MOUNT_INFO_PAYLOAD" ]; then
+            umount "$PAYLOAD_MOUNT_POINT"
+        fi
+    else
+        echo "Info: No third USB partition found. Will not process payload."
+    fi
+
+    # Handle artifacts from partition 4
+    if [ ${#USB_PARTITIONS[@]} -gt 3 ]; then
+        ARTIFACTS_PARTITION="${USB_PARTITIONS[3]}"
+        echo "Found fourth USB partition. Processing artifacts: $ARTIFACTS_PARTITION."
+        
+        ARTIFACTS_HTTP_DEST="/var/www/html/esxi_artifacts"
+        mkdir -p "$ARTIFACTS_HTTP_DEST"
+        
+        ARTIFACTS_MOUNT_POINT=""
+        MOUNT_INFO_ARTIFACTS=$(mount | grep "^$ARTIFACTS_PARTITION " || true)
+
+        if [ -n "$MOUNT_INFO_ARTIFACTS" ]; then
+            ARTIFACTS_MOUNT_POINT=$(echo "$MOUNT_INFO_ARTIFACTS" | awk '{print $3}')
+            echo "Artifacts partition $ARTIFACTS_PARTITION is already mounted at $ARTIFACTS_MOUNT_POINT."
+        else
+            ARTIFACTS_MOUNT_POINT="/mnt/usb_artifacts"
+            mkdir -p "$ARTIFACTS_MOUNT_POINT"
+            echo "Mounting $ARTIFACTS_PARTITION to process artifacts..."
+            mount -o ro "$ARTIFACTS_PARTITION" "$ARTIFACTS_MOUNT_POINT"
+        fi
+
+        echo "Copying artifact files to $ARTIFACTS_HTTP_DEST..."
+        if rsync -av --delete "$ARTIFACTS_MOUNT_POINT/" "$ARTIFACTS_HTTP_DEST"/; then
+            echo "Artifacts copied successfully."
+        else
+            echo "Error: Failed to copy artifacts."
+        fi
+
+        # Unmount partition 4 only if we mounted it
+        if [ -z "$MOUNT_INFO_ARTIFACTS" ]; then
+            umount "$ARTIFACTS_MOUNT_POINT"
+        fi
+    else
+        echo "Info: No fourth USB partition found. Will not process artifacts."
+    fi
+else
+    echo "Info: No second USB partition found. Will not search for a kickstart file or payload on USB."
 fi
 
 # 2. Mount the ESXi installation media
@@ -206,15 +296,25 @@ echo "ESXi ISO unmounted successfully."
 
 # 7. Set permissions
 echo "Setting permissions for boot directories..."
+PAYLOAD_HTTP_DEST="/var/www/html/esxi_payload"
+ARTIFACTS_HTTP_DEST="/var/www/html/esxi_artifacts"
 chmod -R 755 "$ESXI_HTTP_DEST"
 if [ -d "$KS_DEST_DIR" ]; then
     chmod -R 755 "$KS_DEST_DIR"
+fi
+if [ -d "$PAYLOAD_HTTP_DEST" ]; then
+    chmod -R 755 "$PAYLOAD_HTTP_DEST"
+fi
+if [ -d "$ARTIFACTS_HTTP_DEST" ]; then
+    chmod -R 755 "$ARTIFACTS_HTTP_DEST"
 fi
 # Set SELinux context for HTTP directories
 echo "Setting SELinux context for ESXi HTTP directories..."
 semanage fcontext -a -t httpd_sys_content_t "${ESXI_HTTP_DEST}(/.*)?" || true
 semanage fcontext -a -t httpd_sys_content_t "${KS_DEST_DIR}(/.*)?" || true
-restorecon -R "$ESXI_HTTP_DEST" "$KS_DEST_DIR" || true
+semanage fcontext -a -t httpd_sys_content_t "${PAYLOAD_HTTP_DEST}(/.*)?" || true
+semanage fcontext -a -t httpd_sys_content_t "${ARTIFACTS_HTTP_DEST}(/.*)?" || true
+restorecon -R "$ESXI_HTTP_DEST" "$KS_DEST_DIR" "$PAYLOAD_HTTP_DEST" "$ARTIFACTS_HTTP_DEST" 2>/dev/null || true
 
 echo "ESXi HTTP boot files setup complete."
 
