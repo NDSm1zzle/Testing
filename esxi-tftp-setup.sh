@@ -81,21 +81,23 @@ if [ ${#USB_PARTITIONS[@]} -gt 1 ]; then
     KICKSTART_PARTITION="${USB_PARTITIONS[1]}"
     echo "Found second USB partition. Checking for kickstart file: $KICKSTART_PARTITION."
     
+    # Prepare destination
     KS_DEST_FILE="${KS_DEST_DIR}/ks.cfg"
     mkdir -p "$KS_DEST_DIR"
     rm -f "$KS_DEST_FILE"
-    
-    KS_MOUNT_POINT=""
-    MOUNT_INFO=$(mount | grep "^$KICKSTART_PARTITION " || true)
 
-    if [ -n "$MOUNT_INFO" ]; then
-        KS_MOUNT_POINT=$(echo "$MOUNT_INFO" | awk '{print $3}')
-        echo "Kickstart partition $KICKSTART_PARTITION is already mounted at $KS_MOUNT_POINT."
+    # Mount USB partition
+    KS_MOUNT_POINT="/mnt/ks_partition"
+    mkdir -p "$KS_MOUNT_POINT"
+    
+    if mount | grep -q "^$KICKSTART_PARTITION "; then
+        KS_MOUNT_POINT=$(mount | grep "^$KICKSTART_PARTITION " | awk '{print $3}')
+        echo "Partition $KICKSTART_PARTITION already mounted at $KS_MOUNT_POINT."
+        ALREADY_MOUNTED=1
     else
-        KS_MOUNT_POINT="/mnt/ks_partition"
-        mkdir -p "$KS_MOUNT_POINT"
-        echo "Mounting $KICKSTART_PARTITION to check for ks.cfg..."
+        echo "Mounting $KICKSTART_PARTITION to $KS_MOUNT_POINT..."
         mount -o ro "$KICKSTART_PARTITION" "$KS_MOUNT_POINT"
+        ALREADY_MOUNTED=0
     fi
     
     KS_SRC_FILE="${KS_MOUNT_POINT}/ks.cfg"
@@ -104,6 +106,18 @@ if [ ${#USB_PARTITIONS[@]} -gt 1 ]; then
         echo "Found kickstart file on USB at $KS_SRC_FILE. Copying..."
         cp "$KS_SRC_FILE" "$KS_DEST_FILE"
         echo "Successfully copied ks.cfg to $KS_DEST_FILE."
+
+        echo "Sanitizing kickstart file (fixing HTML entities)..."
+        sed -i 's/&gt;/>/g' "$KS_DEST_FILE"
+        sed -i 's/&lt;/</g' "$KS_DEST_FILE"
+        sed -i 's/&amp;/\&/g' "$KS_DEST_FILE"
+
+        echo "Patching kickstart file to improve disk detection..."
+        sed -i '/^INSTALL_DISK=/a [ -z "$INSTALL_DISK" ] && INSTALL_DISK=$(ls /vmfs/devices/disks/ | grep -E "^t" | grep -v ":" | head -n 1)' "$KS_DEST_FILE"
+
+        echo "Patching kickstart file to fix clearpart error..."
+        # Replace --ignoredrives with --drives to target the specific install disk
+        sed -i 's|clearpart --ignoredrives=$INSTALLATION_MEDIA|clearpart --drives=$INSTALL_DISK|' "$KS_DEST_FILE"
 
         echo "Injecting PXE server IP into kickstart file..."
         sed -i "s|__PXE_SERVER_IP__|${PXE_SERVER_IP}|g" "$KS_DEST_FILE"
@@ -114,8 +128,7 @@ if [ ${#USB_PARTITIONS[@]} -gt 1 ]; then
         echo "Warning: ks.cfg was not found at $KS_SRC_FILE."
     fi
     
-    # Unmount partition 2 only if we mounted it
-    if [ -z "$MOUNT_INFO" ]; then
+    if [ "$ALREADY_MOUNTED" -eq 0 ]; then
         umount "$KS_MOUNT_POINT"
     fi
 
